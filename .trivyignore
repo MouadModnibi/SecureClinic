@@ -1,0 +1,12 @@
+# .trivyignore — Trivy false-positive exceptions
+#
+# Add CVE IDs here (one per line) to suppress known false positives
+# or vulnerabilities that cannot be fixed yet.
+#
+# Format:
+#   CVE-YYYY-XXXXX
+#
+# Example:
+#   CVE-2023-12345   # dev-only dep, not reachable in production
+#
+# Keep this list short and always add a comment explaining why.

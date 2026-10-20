@@ -143,3 +143,112 @@ jobs:
       - name: Tests
         if: hashFiles('mobile/package.json') != ''
         run: npm test --if-present
+
+  # ---------------------------------------------------------------
+  # P8 — Shift-left security : Gitleaks + early security checks
+  # Runs first (no dependency) so secrets are caught as early as possible
+  # ---------------------------------------------------------------
+  shift-left-security:
+    name: shift-left-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history needed for Gitleaks to scan all commits in the PR
+          fetch-depth: 0
+
+      # --- Gitleaks : detect hardcoded secrets -----------------------
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Early security checks -------------------------------------
+
+      - name: Check for committed .env files
+        run: |
+          echo "Scanning for committed .env files..."
+          if git ls-files | grep -E '(^|/)\.env$'; then
+            echo "::error::A .env file is tracked by git. Remove it and add it to .gitignore."
+            exit 1
+          fi
+          echo "No .env files tracked – OK"
+
+      - name: Check for private key files
+        run: |
+          echo "Scanning for private key / certificate files..."
+          FOUND=$(git ls-files | grep -E '\.(pem|key|p12|pfx|jks)$' || true)
+          if [ -n "$FOUND" ]; then
+            echo "::error::Private key / certificate files are tracked by git:"
+            echo "$FOUND"
+            exit 1
+          fi
+          echo "No private key files tracked – OK"
+
+      - name: Check PHP debug mode not hardcoded true
+        if: hashFiles('backend/.env.example') != ''
+        run: |
+          echo "Checking APP_DEBUG is not set to true in committed files..."
+          if grep -rn "APP_DEBUG=true" backend/ --include="*.env*" --exclude-dir=.git 2>/dev/null | grep -v ".env.example"; then
+            echo "::error::APP_DEBUG=true found in a committed backend config file."
+            exit 1
+          fi
+          echo "APP_DEBUG check passed – OK"
+
+  # ---------------------------------------------------------------
+  # P4 — Vulnerability scan : Trivy + composer audit + npm audit
+  # Depends on shift-left-security so secrets are clean before scanning deps
+  # ---------------------------------------------------------------
+  vulnerability-scan:
+    name: vulnerability-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: shift-left-security
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Trivy : filesystem scan for CVEs in all ecosystems --------
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          trivyignores: .trivyignore
+
+      # --- composer audit : PHP dependencies -------------------------
+      - name: Run composer audit (backend)
+        if: hashFiles('backend/composer.json') != ''
+        working-directory: backend
+        run: |
+          echo "Running composer audit on backend dependencies..."
+          # Install deps without scripts for speed; audit does not need autoload
+          composer install --no-interaction --prefer-dist --no-progress --no-scripts --quiet
+          composer audit --no-interaction
+
+      # --- npm audit : frontend dependencies -------------------------
+      - name: Run npm audit (frontend)
+        if: hashFiles('frontend/package.json') != ''
+        working-directory: frontend
+        run: |
+          echo "Running npm audit on frontend dependencies..."
+          npm ci --prefer-offline --quiet
+          # Fail on high or critical vulnerabilities
+          npm audit --audit-level=high
+
+      # --- npm audit : mobile dependencies ---------------------------
+      - name: Run npm audit (mobile)
+        if: hashFiles('mobile/package.json') != ''
+        working-directory: mobile
+        run: |
+          echo "Running npm audit on mobile dependencies..."
+          npm ci --prefer-offline --quiet
+          npm audit --audit-level=high
